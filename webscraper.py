@@ -187,4 +187,5 @@ def main():
                 print('Error: no --url flag provided')
         elif 'get' in  cmd:
             get(cmd, groups)
-                
+
+main()
