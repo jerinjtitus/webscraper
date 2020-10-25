@@ -1,5 +1,9 @@
-import socket
-import mysql.connector as sql
+from urllib.request import urlopen
+import json
+from colorIO import cprint
+import time
+import os
+from SHA512 import sha512_encode
 
 class group:
     def __init__(self, group_name):
@@ -13,60 +17,56 @@ class group:
         self.patterns['name'].append(name)
         self.patterns['pattern'].append(pattern)
         self.info.append(info_list)
+    def dump(self):
+        self.patterns = {
+            'name': [],
+            'pattern': []
+        }
+        self.info = []
 
-def get_data(hostname, url):
-    s = socket.socket()
-    s.connect(socket.gethostbyname(hostname), 80)
-    s.send(str.encode('GET {} HTTP/1.1'.format(url)))
-    data = ''
-    while data_packet := s.recv(65536):
-        data += data_packet
-    data = data.decode('utf-8')
-    return data
+def get_data(url):
+    report('Fetching cached data', 'in_progress')
+    html = cache(url, 'read')
+    if html is None:
+        try:
+            report('No cached data found', 'error')
+            report('Sending GET Request', 'in_progress')
+            html = urlopen(url).read()
+            report('Found URL\n  Received data', 'done')
+            time.sleep(0.5)
+            return html.decode('utf-8')
+        except:
+            report('Error: invalid url', 'error')
+    else:
+        report('Found cached data', 'done')
+        return html
 def scrape_info(data, pattern):
-    data = data.spilt('\n')
+    if data is None:
+        return ''
+    data = data.split('\n')
     info_list = []
     for line in data:
-        if pattern['start'] in line:
-            line = line[len(pattern['start']):(len(line) - len(pattern['end']))]
+        if pattern['start'] in line and pattern['end'] in line:
+            line = line.strip()
+            line = line[len(pattern['start']):(line.index(pattern['end']))]
             info_list.append(line)
     return info_list
 def organized_data(group):
     patterns = group.patterns
     info = group.info
     organized_data = {}
-    for i in range(len(info[0])):
-        for j in range(len(patterns['name'])):
-            organized_data[i][patterns['name'][j]] = info[j][i]
+    if info != []:
+        for i in range(len(info[0])):
+            dic = {}
+            for j in range(len(patterns['name'])):
+                dic[patterns['name'][j]] = info[j][i]
+            organized_data[i] = dic
     return organized_data
-def save_data_into_database(data, database, tablename):
-    recursion_counter = 0
-    try:
-        db = sql.connect(host='localhost', user='root',passwd='jerin@2002SQL',auth_plugin='mysql_native_password')
-    except ConnectionError as err:
-        print('{}\nDatabase is not online'.format(err))
-        recursion_counter += 1
-        if recursion_counter < 15:
-            print('Retry {}...'.format(str(recursion_counter)))
-            save_data_into_database(data,database,tablename)
-        else:
-            print('Try again later')
-    cursor = db.cursor()
-    databases = cursor.execute('show databases;') 
-
-    if database == None:
-        cursor.execute('create database webscraper if not exists;')
-        cursor.execute('use webscaper;')
-    else:
-        cursor.execute('create database {} if not exists;'.format(database))
-    
-    cursor.execute('create table {tablename}( ')
-    for key in data.keys():
-        cursor.execute()
 def get(cmd, groups):
     cmd = cmd.split()
     if len(cmd) > 3:
-        print('Error: Invalid commad')
+        report('Error: invalid query', 'error')
+        return None
     group_name = cmd[1]
     output_format = cmd[2:]
 
@@ -75,117 +75,267 @@ def get(cmd, groups):
     else:
         output_format = output_format[0]
 
+    group_exists = False
     if group_name[0] != '-':
-        output_data = organized_data(groups[groups.index(group_name)])
-        if output_format == '--raw':
-            print(output_data)
-    
+        for i in range(len(groups)):
+            if group_name == groups[i]['group_name']:
+                current_group = groups[i]['group']
+                output_data = str(organized_data(current_group))
+                group_exists = True
+                break
+        if group_exists:
+            if output_format == '--raw':
+                return output_data
+            elif output_format == '--pretty':
+                return json_pretty_print(eval(output_data))
+        else:
+            report('Error: no group named \'{}\' exists'.format(group_name), 'error')
+            return None
     else:
-        print('Error: no group name provided')
+        report('Error: no group name provided', 'error')
+        return None
+def parse_cmd(cmd):
+    cmd = cmd.split(' -')
+    command = cmd[0].strip()
+    flags = []
+    for tag in cmd [1:]:
+        try:
+            index_of_first_space = tag.index(' ')
+        except:
+            index_of_first_space = len(tag)
+        flags.append({
+            'flag': '-' + tag[:index_of_first_space],
+            'input': tag[index_of_first_space+1:]
+        })
+    return command, flags
+def scrap_cmd(flags_list, groups):
+    flags = []
+    input_val = []
+    confirmation = True
+    for flag in flags_list:
+        flags.append(flag['flag'])
+        input_val.append(flag['input'])
+    
+    if '--url' in flags:
+        url = input_val[flags.index('--url')]
+    elif '--html' in flags:
+        html = input_val[flags.index('--html')]
+        url = None
+    else:
+        url = None
+        html = None
+        
+    if '-n' in flags:
+        pattern_name = input_val[flags.index('-n')]
+    elif '--name' in flags:
+        pattern_name = input_val[flags.index('--name')]
+    else: 
+        pattern_name = None
+
+    if '-s' in flags:
+        start_pattern = input_val[flags.index('-s')]
+    elif '--start' in flags:
+        start_pattern = input_val[flags.index('--start')]
+    else:
+        report('Error: no starting pattern flag was provided (-s or --start)', 'error')
+        confirmation = False
+
+    if '-e' in flags:
+        end_pattern = input_val[flags.index('-e')]
+    elif '--end' in flags:
+        end_pattern = input_val[flags.index('--end')]
+    else:
+        report('Error: no ending pattern flag was provided (-e or --end)', 'error')
+        confirmation = False
+
+    if '-g' in flags:
+        group_name = input_val[flags.index('-g')]
+        if group_name == 'default':
+            yn = input('Warning: \'default\' is a reserved group used by webscraper.\nDo you still want to use it anyway(y/n): ')
+            if yn != 'y'and yn != 'Y':
+                confirmation = False
+
+    elif '--group' in flags:
+        group_name = input_val[flags.index('--group')]
+        if group_name == 'default':
+            yn = input('Warning: \'default\' is a reserved group used by webscraper.\nDo you still want to use it anyway(y/n): ')
+            if yn != 'y'or yn != 'Y':
+                confirmation = False
+    else:
+        group_name = 'default'
+
+    if '--pretty' in flags:
+        output_format = '--pretty'
+    else: 
+        output_format = ''
+    
+    cache_code = False
+    if '--cache' in flags:
+        cache_code = True
+
+    if confirmation == True:
+        group_exists = does_group_exists(group_name,groups)
+        if not group_exists:
+            groups.append({'group_name':group_name, 'group': group(group_name)})
+        
+        pattern = {
+            'start': start_pattern,
+            'end': end_pattern
+        }
+
+        data = None
+        if url != None:
+            data = get_data(url)
+            if cache_code == True:
+                cache(url, 'write', data)
+            info = scrape_info(data, pattern)
+        elif html != None:
+            pass 
+        else:
+            report('Error: no link is provided (check if you used --url or --html)', 'error')
+
+        if data is not None:
+            if '-g' not in flags and '--group' not in flags:
+                groups[0]['group'].add(pattern_name, pattern, info)
+                print(get('get default '+output_format ,groups))
+                groups[0]['group'].dump()
+            else:
+                for i in range(len(groups)):
+                    if group_name == groups[i]['group_name']:
+                        current_group = groups[i]['group']
+                        break
+                current_group.add(pattern_name, pattern, info)
+                report('Scraped information has been added to group \'{}\''.format(current_group.group_name), 'done')
+    else:
+        print('')
+def does_group_exists(group_name, groups):
+    group_exists = False
+    for i in range(len(groups)):
+        if groups[i]['group_name'] == group_name:
+            group_exists = True
+    return group_exists
+def dump_group(cmd, groups):
+    group_name = cmd.replace('dump ','').strip()
+    group_exists = does_group_exists(group_name,groups)
+    if group_exists:
+        for i in range(len(groups)):
+            if group_name == groups[i]['group_name']:
+                groups[i]['group'].dump()
+                break
+    else:
+        report('Error: no group named \'{}\' exists'.format(group_name), 'error')
+def json_pretty_print(dic):
+    return json.dumps(dic, indent=4)
+def report(message, m_type):
+    if m_type == 'error':
+        cprint(message, 'red')
+    elif m_type == 'done':
+        cprint(message, 'green')
+    elif m_type == 'in_progress':
+        cprint(message, 'yellow')
+def cache(url, action, code = ''):
+    if '.codecache' not in os.listdir():
+        os.system('mkdir .codecache')
+    url = sha512_encode(url)
+    if action == 'write':
+        if '{}.cache'.format(url) not in os.listdir('.codecache'):
+            os.system('> .codecache/{}.cache'.format(url))
+            with open('.codecache/{}.cache'.format(url), 'w') as cache:
+                cache.write(code)
+                cache.close()
+            
+    elif action == 'read':
+        try:
+            with open('.codecache/{}.cache'.format(url), 'r') as cache:
+                code = cache.read()
+                cache.close()
+            return code
+        except FileNotFoundError:
+            return None
+def flush(cmd):
+    cmd = cmd.strip().split()
+    if len(cmd) > 2:
+        report('Error: invalid query', 'error')
+        return None
+    if cmd[1] == 'all':
+        os.system('rm .codecache/*')
+        report('all cache has been cleared', 'done')
+    else:
+        cache_sha = sha512_encode(cmd[1])
+        if '{}.cache'.format(cache_sha) in os.listdir('.codecache'):
+            os.system('rm .codecache/{}.cache'.format(cache_sha))
+            report('cache from url \'{}\' has been removed', 'done')
+        else:
+            report('no cache from url \'{}\' exists', 'error')
+def save(group_name, file_name, groups):
+    save_data = get('get {} --pretty'.format(group_name), groups)
+    if '.saved' not in os.listdir():
+        os.system('mkdir .saved')
+    if file_name is None:
+        save_file_location = '.saved/{}-{}.save'.format(group_name, sha512_encode(save_data))
+    else:
+        save_file_location = '.saved/{}.save'.format(file_name)
+
+    os.system('> {}'.format(save_file_location))
+    if save_data is not None:
+        with open(save_file_location, 'w') as save_file:
+            save_file.write(save_data)
+            save_file.close()
+        if file_name is None:
+            report('data saved by fetch code \'{}-{}\''.format(group_name ,sha512_encode(save_data)), 'done')
+        else:
+            report('data saved by name \'{}.save\''.format(file_name), 'error')
+def get_save_file(file_name):
+    try:
+        with open('.saved/{}.save'.format(file_name),'r') as save_file:
+            print(save_file.read())
+            save_file.close()
+    except FileNotFoundError:
+        report('Error: file not found','error')
 
 def main():
+    groups = []
+    groups.append({'group_name':'default', 'group': group('default')})
+
     while True:
-        groups = []
-        groups.append({'group_name':'default', 'group': group('default')})
+        cmd = input('\n[webscraper] $ ')
+        cmd, flags = parse_cmd(cmd)
 
-        cmd = input('\nwebscraper$ ')
-        if cmd.strip() == 'help':
-            print('')
-        elif 'scrap ' in cmd:
-            cmd = cmd.split()
-            if '--url' in cmd:
-                if len(cmd) > cmd.index('--url')+1 :
-                    url = cmd[cmd.index('--url')+1]
-                    if url[0] == '-':
-                        print('Error: no url provided')
-                    else:
-                        try:
-                            hostname = url.split('/')[2]
-                        except:
-                            print('Error: not a valid url')
-                            continue
-                        
-                        try:
-                            if '-n' in cmd:
-                                pattern_name = cmd[cmd.index('-n')+1]
-                            elif '--pattern-name' in cmd:
-                                pattern_name = cmd[cmd.index('--pattern-name')+1]
-                            else: 
-                                pattern_name = None
-                        except:
-                            print('Error: no pattern name was provided')
-                            continue
+        help_message = ''
 
-                        try:
-                            if '-s' in cmd:
-                                start_pattern = cmd[cmd.index('-s')+1]
-                            elif '--start' in cmd:
-                                start_pattern = cmd[cmd.index('--start')+1]
-                            else:
-                                print('Error: no starting pattern flag was provided (-s or --start)')
-                                continue
-                        except:
-                            print('Error: no starting pattern was provided')
-                            continue
-                        try:
-                            if '-e' in cmd:
-                                end_pattern = cmd[cmd.index('-e')+1]
-                            elif '--end' in cmd:
-                                end_pattern = cmd[cmd.index('--end')+1]
-                            else:
-                                print('Error: no ending pattern flag was provided (-e or --end)')
-                                continue
-                        except:
-                            print('Error: no ending pattern was provided')
-                            continue
-                        try:
-                            if '-g' in cmd:
-                                group_name = cmd[cmd.index('-g')+1]
-                                group_exists = False
-                                if group_name == 'default':
-                                    print('Error: you can\'t use \'default\' as a group name')
-                                for i in range(len(groups)):
-                                    if groups[i]['group_name'] == group_name:
-                                        group_exists = True
-                                if not group_exists:
-                                    groups.append({'group_name':group_name, 'group': group(group_name)})
-                            elif '--group' in cmd:
-                                group_name = cmd[cmd.index('--group')+1]
-                                group_exists = False
-                                for i in range(len(groups)):
-                                    if groups[i]['group_name'] == group_name:
-                                        group_exists = True
-                                if not group_exists:
-                                    groups.append({'group_name':group_name, 'group': group(group_name)})
-                                
-
-                        except:
-                            print('Error: no group name was provided')
-                            continue
-
-                        pattern = {
-                            'start': start_pattern,
-                            'end': end_pattern
-                        }
-
-                        if '-g' or '--group' not in cmd:
-                            data = get_data(hostname, url)  
-                            info = scrape_info(data, pattern)
-                            groups[0].add(pattern_name, pattern, info)
-                            get('get default',groups)
-                        else:
-                            data = get_data(hostname, url)  
-                            info = scrape_info(data, pattern)
-                            for i in range(len(groups)):
-                                if group_name == groups[i]['name']:
-                                    current_group = groups[i]['group']
-                                    break
-                            current_group.add(pattern_name, pattern, info)
-                else:
-                    print('Error: no url provided')
+        if cmd == 'help':
+            print(help_message)
+        elif cmd == 'scrap':
+            scrap_cmd(flags, groups)
+        elif 'get ' in cmd:
+            if flags == []:
+                flags.append({'flag':''})
+            flag = flags[0]
+            if (data := get('{} {}'.format(cmd, flag['flag']), groups)) is not None:
+                print(data)
+        elif 'dump ' in cmd:
+            dump_group(cmd, groups)
+            report('group \'{}\' has been dumped'.format(cmd.replace('dump ', '')), 'done')
+        elif 'flush ' in cmd:
+            flush(cmd)
+        elif 'save' in cmd:
+            group_name = cmd.replace('save ','')
+            file_name = None
+            if flags != []:
+                for flag in flags:
+                    file_name = flag['input']
+                    if '--name' == flag['flag']:
+                        save(group_name, file_name, groups)
+                        break
+                    if '--get' == flag['flag']:
+                        get_save_file(file_name)  
             else:
-                print('Error: no --url flag provided')
-        elif 'get' in  cmd:
-            get(cmd, groups)
+                save(group_name, file_name, groups)
+        elif cmd == 'quit' or cmd == 'exit':
+            break
+        elif cmd == 'clear':
+            os.system('clear')
+        else:
+            report('Error: invalid query', 'error')
 
 main()
